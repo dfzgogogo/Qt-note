@@ -235,22 +235,28 @@ private:
         }
 
         void cancelTask(const std::shared_ptr<detail::TaskState<T>>& task, Status status) {
-            if (active && active->state == task) {
-                finishActive(status);
-                return;
-            }
-            for (auto it = pending.begin(); it != pending.end(); ++it) {
-                if (it->state == task) {
-                    it->state->finish({status, std::nullopt, nullptr});
-                    pending.erase(it);
-                    return;
+            std::optional<Item> cancelled;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (active && active->state == task) {
+                    cancelled.emplace(std::move(*active));
+                    active.reset();
+                } else {
+                    for (auto it = pending.begin(); it != pending.end(); ++it) {
+                        if (it->state == task) {
+                            cancelled.emplace(std::move(*it));
+                            pending.erase(it);
+                            break;
+                        }
+                    }
                 }
+            }
+            if (cancelled) {
+                finishItem(std::move(*cancelled), status);
             }
         }
 
-        void finishActive(Status status) {
-            auto item = std::move(*active);
-            active.reset();
+        static void finishItem(Item item, Status status) {
             std::function<void()> cancelHandler;
             {
                 std::lock_guard<std::mutex> lock(item.state->cancelHandlerMutex);
@@ -262,15 +268,31 @@ private:
             item.state->finish({status, std::nullopt, nullptr});
         }
 
+        void finishActive(Status status) {
+            auto item = std::move(*active);
+            active.reset();
+            finishItem(std::move(item), status);
+        }
+
         void stop() {
-            stopping = true;
-            if (active) {
-                finishActive(Status::Stopped);
+            std::optional<Item> running;
+            std::deque<Item> queued;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                stopping = true;
+                if (active) {
+                    running.emplace(std::move(*active));
+                    active.reset();
+                }
+                queued = std::move(pending);
+                pending.clear();
             }
-            for (auto& item : pending) {
-                item.state->finish({Status::Stopped, std::nullopt, nullptr});
+            if (running) {
+                finishItem(std::move(*running), Status::Stopped);
             }
-            pending.clear();
+            for (auto& item : queued) {
+                finishItem(std::move(item), Status::Stopped);
+            }
         }
 
         void run() {
@@ -293,7 +315,8 @@ private:
                     lock.unlock();
                     try {
                         if (state->cancelRequested.load()) {
-                            cancelTask(state, Status::Cancelled);
+                            state->finish({Status::Cancelled, std::nullopt, nullptr});
+                            active.reset();
                         } else {
                             start(TaskControl<T>(state));
                         }
