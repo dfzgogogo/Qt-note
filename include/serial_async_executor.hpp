@@ -44,7 +44,8 @@ struct TaskState {
     std::atomic<bool> completed{false};
     std::promise<Result<T>> promise;
     std::function<void(std::shared_ptr<TaskState>, Result<T>)> completionSink;
-    std::function<void()> cancelHandler; // Worker-thread only.
+    std::mutex cancelHandlerMutex;
+    std::function<void()> cancelHandler;
 
     explicit TaskState(std::uint64_t requestId) : id(requestId) {}
 
@@ -78,6 +79,7 @@ public:
     // The handler runs on the executor's worker thread. It should only begin
     // cancellation; completion is owned by the executor.
     void on_cancel(std::function<void()> handler) const {
+        std::lock_guard<std::mutex> lock(state_->cancelHandlerMutex);
         state_->cancelHandler = std::move(handler);
     }
 
@@ -249,8 +251,13 @@ private:
         void finishActive(Status status) {
             auto item = std::move(*active);
             active.reset();
-            if (item.state->cancelHandler) {
-                item.state->cancelHandler();
+            std::function<void()> cancelHandler;
+            {
+                std::lock_guard<std::mutex> lock(item.state->cancelHandlerMutex);
+                cancelHandler = item.state->cancelHandler;
+            }
+            if (cancelHandler) {
+                cancelHandler();
             }
             item.state->finish({status, std::nullopt, nullptr});
         }

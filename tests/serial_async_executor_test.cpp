@@ -1,5 +1,6 @@
 #include "../include/serial_async_executor.hpp"
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <future>
@@ -9,7 +10,7 @@ using namespace std::chrono_literals;
 
 int main() {
     serial_async::SerialAsyncExecutor<int> executor(1);
-    int running = 0;
+    std::atomic<int> running{0};
     std::promise<void> firstStarted;
 
     auto first = executor.submit(
@@ -22,7 +23,7 @@ int main() {
     firstStarted.get_future().wait();
     auto second = executor.submit(
         [&](auto control) {
-            assert(running == 0);
+            assert(running.load() == 0);
             control.complete(42);
         },
         100ms);
